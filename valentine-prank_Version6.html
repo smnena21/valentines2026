@@ -1,0 +1,539 @@
+<!doctype html>
+<!--
+  valentine-prank.html
+  Version: v1.2.1
+  Date: 2026-02-02
+  Summary:
+    - Single playable level (renamed to Level 1).
+    - Fixed: ensured the visible path connects cleanly to the finish (black heart).
+    - Fixed: ghost jump-scare now fades/backdrops before the end overlay appears so the end scene is fully visible.
+    - Pixel-mask hit testing and runtime image inlining retained.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Valentine Maze — Single Level (v1.2.1)</title>
+  <style>
+    :root{
+      --bg: #fff6fb;
+      --path: #ff9ec6;
+      --edge: #f6c1d8;
+      --muted: #7a6e78;
+      --red-blood: #8b0000;
+    }
+    *{box-sizing:border-box}
+    html,body{height:100%;margin:0;font-family:Inter,system-ui,Segoe UI,Roboto,"Helvetica Neue",Arial}
+    body{background:linear-gradient(180deg,#fff6fb 0%, #ffeef2 100%);display:flex;align-items:center;justify-content:center;padding:20px}
+
+    .hidden{display:none !important}
+
+    .overlay{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.45);z-index:50}
+    .card, .endcard{background:white;padding:20px;border-radius:14px;max-width:520px;width:90%;text-align:center;box-shadow:0 8px 30px rgba(0,0,0,0.2)}
+    .card h1{margin:0 0 8px}
+    .muted{color:var(--muted);margin:0 0 12px}
+    .controls{margin-top:12px}
+    #start-btn{padding:10px 18px;border-radius:8px;background:#ff6fa3;border:0;color:white;font-weight:600;cursor:pointer}
+    #start-btn:disabled{opacity:.5;cursor:not-allowed}
+    .consent{display:block;margin:8px 0;color:var(--muted);font-size:0.95rem}
+    .warn{color:#7b1e1e;font-size:0.9rem;margin-top:12px}
+
+    #game{max-width:1000px;width:100%;max-height:700px;display:flex;flex-direction:column;align-items:center}
+    .hud{width:100%;display:flex;justify-content:space-between;padding:8px 0 14px 0;max-width:1000px}
+    /* Maze size is fixed to make coordinates reliable */
+    #maze{position:relative;background:linear-gradient(180deg,#fff 0,#ffeef6 100%);width:980px;height:560px;border-radius:10px;box-shadow:0 6px 30px rgba(0,0,0,.15);overflow:hidden;cursor:none;outline:none}
+
+/* Visible path segments are generated from the same data used to draw the mask.
+   They use the same coords so visuals equal hitmask. */
+    .segment{position:absolute;background:var(--path);border-radius:20px;border:6px solid var(--edge);box-shadow:inset 0 -6px 10px rgba(0,0,0,0.02)}
+    .finish{position:absolute;left:720px;top:420px;font-size:32px;pointer-events:auto;z-index:20}
+
+/* Player / ghost visuals */
+    #player{position:absolute;width:48px;height:48px;transform:translate(-50%,-50%);z-index:30;pointer-events:none;transition:transform .06s ease}
+    #svg-organ{display:none}
+    #ghost{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;z-index:60;pointer-events:none}
+    #ghost svg{width:320px;opacity:0;transform:translateY(-20px) scale(1.1);transition:opacity .22s ease, transform .22s ease}
+
+/* End overlay */
+    .endcard{max-width:820px}
+    .bloody{
+      color:var(--red-blood);
+      font-weight:800;
+      font-size:32px;
+      letter-spacing:1px;
+      text-shadow: 0 2px 0 #400, 0 6px 10px rgba(139,0,0,0.3);
+      margin:6px 0 12px;
+    }
+    .choices{display:flex;gap:40px;justify-content:center;align-items:flex-end}
+    .choice{display:flex;flex-direction:column;align-items:center}
+    .choice-img{width:160px;height:160px;object-fit:contain;border-radius:12px;background:white;padding:6px;border:2px solid rgba(0,0,0,0.05)}
+    .primary{background:#ff6fa3;color:white;border:0;padding:10px 18px;border-radius:10px;margin-top:8px;cursor:pointer}
+    .secondary{background:#f2f2f2;color:#333;border:0;padding:10px 18px;border-radius:10px;margin-top:8px;cursor:pointer}
+
+    @media (max-width:760px){
+      #maze{width:92vw;height:60vh}
+      .choice-img{width:120px;height:120px}
+      .endcard{padding:14px}
+    }
+  </style>
+</head>
+<body>
+  <div id="overlay-start" class="overlay">
+    <div class="card">
+      <h1>Guide the heart to true love!</h1>
+      <p class="muted">Move your cursor to guide the heart along the pink path. Don't touch the edges.</p>
+      <label class="consent">
+        <input type="checkbox" id="consent"> I understand this prank may be startling and I accept responsibility.
+      </label>
+      <label class="consent">
+        <input type="checkbox" id="disable-scare"> Disable jump-scare (safe mode)
+      </label>
+      <div class="controls">
+        <button id="start-btn" disabled>Start Game</button>
+      </div>
+      <p class="warn">Warning: jump-scares can be harmful to people with heart conditions or epilepsy. Use responsibly.</p>
+    </div>
+  </div>
+
+  <div id="game">
+    <div class="hud">
+      <div>Level: <span id="level-num">1</span></div>
+      <div id="msg"></div>
+    </div>
+
+    <div id="maze" tabindex="0" aria-label="Valentine maze">
+      <!-- Visual segments - placed by JS from path definitions to stay in sync with mask -->
+      <div id="segments-container" aria-hidden="true"></div>
+
+      <div id="finish" class="finish hidden">❤</div>
+
+      <!-- player SVGs -->
+      <div id="player" aria-hidden="true">
+        <svg id="svg-heart" viewBox="0 0 100 100" width="48" height="48">
+          <defs><linearGradient id="g1" x1="0" x2="1"><stop offset="0" stop-color="#ff93b8"/><stop offset="1" stop-color="#ff5a9b"/></linearGradient></defs>
+          <path d="M50 86s-34-20-42-34c-7-12 1-28 14-30 12-2 19 7 22 10 3-3 10-12 22-10 13 2 21 18 14 30-8 14-42 34-42 34z" fill="url(#g1)"/>
+        </svg>
+        <svg id="svg-organ" viewBox="0 0 100 100" width="96" height="96">
+          <defs><linearGradient id="g2" x1="0" x2="1"><stop offset="0" stop-color="#b30000"/><stop offset="1" stop-color="#7a0000"/></linearGradient></defs>
+          <path d="M20 45c0-18 14-28 30-28s30 10 30 28 0 18-20 32c-6 4-14 6-20 6s-14-2-20-6C20 63 20 63 20 45z" fill="url(#g2)"/>
+          <circle cx="45" cy="40" r="3" fill="#300"/><circle cx="60" cy="50" r="3" fill="#300"/>
+        </svg>
+      </div>
+
+      <div id="ghost" class="hidden" aria-hidden="true">
+        <svg viewBox="0 0 120 120" width="320" height="320">
+          <g fill="white" stroke="#222" stroke-width="3">
+            <path d="M20,60 q0-35 40-35 q40 0 40 35 v15 q0 10-10 10 q-6 0-10-6 q-6 6-12 6 q-6 0-12-6 q-4 6-10 6 q-10 0-10-10 z" />
+            <circle cx="45" cy="55" r="6" fill="#111"/>
+            <circle cx="75" cy="55" r="6" fill="#111"/>
+            <path d="M50 72 q10 8 20 0" stroke="#111" stroke-width="3" fill="none" stroke-linecap="round"/>
+          </g>
+        </svg>
+      </div>
+    </div>
+  </div>
+
+  <div id="overlay-end" class="overlay hidden" aria-hidden="true">
+    <div class="endcard">
+      <h2 class="bloody">Will you be my Valentines?</h2>
+
+      <div class="choices">
+        <div class="choice">
+          <img id="img-capy" class="choice-img" alt="capybara">
+          <button id="yes-btn" class="primary">Yes</button>
+        </div>
+        <div class="choice">
+          <img id="img-chomby" class="choice-img" alt="chomby">
+          <button id="no-btn" class="secondary">No</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    /****************************************************************
+     * valentine-prank.html (v1.2.1)
+     *
+     * - Single playable level (renamed to Level 1).
+     * - Visible path is connected to the finish (no floating finish).
+     * - Ghost jump-scare fades/backdrops before showing end overlay so the end-scene is visible.
+     ****************************************************************/
+
+    // Image URLs (will be inlined at runtime when possible)
+    const CAPY_URL = "https://img.freepik.com/premium-vector/cute-cartoon-capybara-hold-valentine-heart-card-white-background_555467-6909.jpg?semt=ais_hybrid&w=740&q=80";
+    const CHOMBY_URL = "https://images.neopets.com/pets/sad/chomby_baby_baby.gif";
+
+    // Maze canonical size
+    const MAZE_W = 980, MAZE_H = 560;
+
+    // Single level path (now labeled level 1)
+    // Segments chosen to visually and procedurally connect to the finish at (720,420).
+    const PATHS = {
+      1: [
+        {x:40,y:40,w:100,h:40,r:20},
+        {x:80,y:30,w:40,h:380,r:20},
+        // extended horizontal segment that reaches the finish area so no gap
+        {x:100,y:360,w:640,h:40,r:20},
+        // optional approach pad already overlapping finish region
+        {x:680,y:400,w:80,h:60,r:18}
+      ]
+    };
+
+    // finish coordinates (center) and radius for detection
+    const FINISH_POS = { x: 720, y: 420, r: 28 };
+
+    // UI elements
+    const startBtn = document.getElementById('start-btn');
+    const consentChk = document.getElementById('consent');
+    const disableScareChk = document.getElementById('disable-scare');
+    const overlayStart = document.getElementById('overlay-start');
+    const overlayEnd = document.getElementById('overlay-end');
+    const maze = document.getElementById('maze');
+    const segmentsContainer = document.getElementById('segments-container');
+    const finishEl = document.getElementById('finish');
+    const player = document.getElementById('player');
+    const ghost = document.getElementById('ghost');
+    const levelNum = document.getElementById('level-num');
+    const msg = document.getElementById('msg');
+    const imgCapy = document.getElementById('img-capy');
+    const imgChomby = document.getElementById('img-chomby');
+
+    let level = 1; // now the single playable level
+    let scareDisabled = false;
+    let finishTriggered = false;
+
+    // Offscreen mask canvas
+    const maskCanvas = document.createElement('canvas');
+    maskCanvas.width = MAZE_W;
+    maskCanvas.height = MAZE_H;
+    const maskCtx = maskCanvas.getContext('2d');
+
+    // start button gating
+    consentChk.addEventListener('change', () => startBtn.disabled = !consentChk.checked);
+
+    startBtn.addEventListener('click', () => {
+      overlayStart.classList.add('hidden');
+      showLevel(1);
+      scareDisabled = disableScareChk.checked;
+      playSweetLoop();
+      inlineImages();
+    });
+
+    // Build visual segments
+    function buildVisualSegments(){
+      segmentsContainer.innerHTML = '';
+      for (const [lvl, segs] of Object.entries(PATHS)){
+        const wrapper = document.createElement('div');
+        wrapper.className = `level level-${lvl}`;
+        wrapper.dataset.level = lvl;
+        wrapper.style.position = 'absolute';
+        wrapper.style.left = '0';
+        wrapper.style.top = '0';
+        wrapper.style.width = MAZE_W + 'px';
+        wrapper.style.height = MAZE_H + 'px';
+        wrapper.style.pointerEvents = 'none';
+        segs.forEach((s) => {
+          const d = document.createElement('div');
+          d.className = 'segment';
+          d.style.left = s.x + 'px';
+          d.style.top = s.y + 'px';
+          d.style.width = s.w + 'px';
+          d.style.height = s.h + 'px';
+          d.style.borderRadius = (s.r || 20) + 'px';
+          d.style.boxSizing = 'border-box';
+          d.style.pointerEvents = 'none';
+          wrapper.appendChild(d);
+        });
+        wrapper.classList.add('hidden');
+        segmentsContainer.appendChild(wrapper);
+      }
+    }
+
+    // Draw mask for specified level
+    function drawMaskForLevel(n){
+      maskCtx.clearRect(0,0,MAZE_W,MAZE_H);
+      maskCtx.fillStyle = 'rgba(0,0,0,1)';
+      const segs = PATHS[n];
+      segs.forEach(s => drawRoundRect(maskCtx, s.x, s.y, s.w, s.h, s.r || 20));
+      // Ensure finish area included
+      drawRoundRect(maskCtx, FINISH_POS.x - FINISH_POS.r - 6, FINISH_POS.y - FINISH_POS.r - 6, (FINISH_POS.r+6)*2, (FINISH_POS.r+6)*2, 18);
+    }
+
+    function drawRoundRect(ctx, x, y, w, h, r){
+      const radius = Math.min(r, w/2, h/2);
+      ctx.beginPath();
+      ctx.moveTo(x + radius, y);
+      ctx.arcTo(x + w, y, x + w, y + h, radius);
+      ctx.arcTo(x + w, y + h, x, y + h, radius);
+      ctx.arcTo(x, y + h, x, y, radius);
+      ctx.arcTo(x, y, x + w, y, radius);
+      ctx.closePath();
+      ctx.fill();
+    }
+
+    // Mask sampling
+    function isPointOnMask(clientX, clientY){
+      const rect = maze.getBoundingClientRect();
+      const mx = clientX - rect.left;
+      const my = clientY - rect.top;
+      if (mx < 0 || my < 0 || mx >= rect.width || my >= rect.height) return false;
+      const scaleX = MAZE_W / rect.width;
+      const scaleY = MAZE_H / rect.height;
+      const sx = Math.floor(mx * scaleX);
+      const sy = Math.floor(my * scaleY);
+      const p = maskCtx.getImageData(sx, sy, 1, 1).data;
+      return p[3] > 0;
+    }
+
+    function isOnFinish(clientX, clientY){
+      const rect = maze.getBoundingClientRect();
+      const mx = clientX - rect.left;
+      const my = clientY - rect.top;
+      if (mx < 0 || my < 0 || mx >= rect.width || my >= rect.height) return false;
+      const scaleX = MAZE_W / rect.width;
+      const scaleY = MAZE_H / rect.height;
+      const sx = mx * scaleX;
+      const sy = my * scaleY;
+      const dx = sx - FINISH_POS.x;
+      const dy = sy - FINISH_POS.y;
+      return (dx*dx + dy*dy) <= (FINISH_POS.r * FINISH_POS.r);
+    }
+
+    // Mouse handling
+    maze.addEventListener('mousemove', (e) => {
+      const rect = maze.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      const y = e.clientY - rect.top;
+      player.style.left = `${x}px`;
+      player.style.top = `${y}px`;
+      player.style.transform = 'translate(-50%,-50%) scale(1)';
+
+      const onPath = isPointOnMask(e.clientX, e.clientY);
+      const onFinish = isOnFinish(e.clientX, e.clientY);
+
+      if (!onPath && !onFinish) handleCollision();
+      else if (onFinish) handleFinish();
+    });
+    maze.addEventListener('mouseleave', handleCollision);
+
+    function handleCollision(){
+      msg.textContent = 'Ouch! Try again.';
+      setTimeout(()=> msg.textContent = '', 900);
+      // Reset player to start of first segment
+      const seg = PATHS[1][0];
+      const mazeRect = maze.getBoundingClientRect();
+      const scaleX = mazeRect.width / MAZE_W;
+      const scaleY = mazeRect.height / MAZE_H;
+      const startX = (seg.x + 20) * scaleX;
+      const startY = (seg.y + 20) * scaleY;
+      player.style.left = `${startX}px`;
+      player.style.top = `${startY}px`;
+    }
+
+    function showLevel(n){
+      level = n;
+      levelNum.textContent = level;
+      document.querySelectorAll('.level').forEach(w => w.classList.add('hidden'));
+      const wrapper = document.querySelector(`.level-${n}`);
+      if (wrapper) wrapper.classList.remove('hidden');
+      finishEl.classList.remove('hidden');
+      drawMaskForLevel(n);
+      finishTriggered = false;
+      handleCollision();
+    }
+
+    function handleFinish(){
+      if (finishTriggered) return;
+      finishTriggered = true;
+      if (scareDisabled) { endSequence(); return; }
+
+      // Jump-scare sequence: show ghost above maze first
+      ghost.classList.remove('hidden');
+      const gsvg = ghost.querySelector('svg');
+      gsvg.style.opacity = '0';
+      setTimeout(()=> {
+        gsvg.style.opacity = '1';
+        gsvg.style.transform = 'translateY(0) scale(1)';
+      }, 20);
+
+      // organ swap + heartbeat
+      switchToOrgan();
+      playHorror();
+      player.animate([
+        { transform: 'translate(-50%,-50%) scale(1)' },
+        { transform: 'translate(-50%,-50%) scale(1.06)' },
+        { transform: 'translate(-50%,-50%) scale(0.98)' }
+      ], { duration: 600, iterations: 6 });
+
+      // After the jump-scare, fade/backdrop the ghost so overlay is fully visible
+      setTimeout(() => {
+        // fade ghost down and push behind overlay
+        ghost.style.transition = 'opacity 400ms ease';
+        ghost.style.opacity = '0.12';
+        // ensure overlay (z-index 50) is above ghost
+        ghost.style.zIndex = '40';
+        // now show end overlay
+        endSequence();
+      }, 1200);
+      // stop sweet loop earlier
+      stopSweetLoop();
+    }
+
+    function switchToOrgan(){
+      document.getElementById('svg-heart').style.display = 'none';
+      document.getElementById('svg-organ').style.display = '';
+      player.style.width = '96px';
+      player.style.height = '96px';
+    }
+
+    function endSequence(){
+      overlayEnd.classList.remove('hidden');
+      stopHorror();
+      stopSweetLoop();
+    }
+
+    // Audio (unchanged)
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    let audioCtx = null;
+    let sweetInterval = null;
+    let sweetNodes = [];
+    let horrorNodes = null;
+    function ensureAudioCtx(){ if (!audioCtx) audioCtx = new AudioCtx(); }
+    function playSweetLoop(){
+      ensureAudioCtx();
+      if (sweetInterval) return;
+      const baseGain = audioCtx.createGain();
+      baseGain.gain.value = 0.12;
+      baseGain.connect(audioCtx.destination);
+      const notes = [
+        [261.63, 329.63, 392.00],
+        [293.66, 369.99, 440.00],
+        [329.63, 415.30, 493.88],
+      ];
+      let idx = 0;
+      sweetInterval = setInterval(() => {
+        const chord = notes[idx % notes.length];
+        const group = [];
+        chord.forEach((f, i) => {
+          const osc = audioCtx.createOscillator();
+          const gain = audioCtx.createGain();
+          osc.type = i===1 ? 'sine' : 'triangle';
+          osc.frequency.value = f;
+          gain.gain.value = 0;
+          osc.connect(gain);
+          gain.connect(baseGain);
+          osc.start();
+          const now = audioCtx.currentTime;
+          gain.gain.cancelScheduledValues(now);
+          gain.gain.setValueAtTime(0, now);
+          gain.gain.linearRampToValueAtTime(0.25/(i+1), now+0.02);
+          gain.gain.exponentialRampToValueAtTime(0.0001, now+1.1);
+          setTimeout(()=>{ try{ osc.stop(); }catch(e){} }, 1400);
+          group.push({osc,gain});
+        });
+        sweetNodes.push(group);
+        idx++;
+      }, 700);
+    }
+    function stopSweetLoop(){
+      if (sweetInterval) { clearInterval(sweetInterval); sweetInterval = null; }
+      sweetNodes.forEach(group => group.forEach(n => { try{ n.osc.stop(); }catch(e){} }));
+      sweetNodes = [];
+    }
+    function playHorror(){
+      ensureAudioCtx();
+      const bufferSize = audioCtx.sampleRate;
+      const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+      const data = buffer.getChannelData(0);
+      for (let i=0;i<bufferSize;i++) data[i] = (Math.random()*2-1)*0.6;
+      const noise = audioCtx.createBufferSource();
+      noise.buffer = buffer;
+      const noiseFilter = audioCtx.createBiquadFilter();
+      noiseFilter.type = 'bandpass';
+      noiseFilter.frequency.value = 1000;
+      noiseFilter.Q.value = 0.4;
+      const noiseGain = audioCtx.createGain();
+      noiseGain.gain.value = 0;
+      noise.connect(noiseFilter);
+      noiseFilter.connect(noiseGain);
+      noiseGain.connect(audioCtx.destination);
+      noise.start();
+      const osc = audioCtx.createOscillator();
+      osc.type = 'sawtooth';
+      osc.frequency.value = 600;
+      const oscGain = audioCtx.createGain();
+      oscGain.gain.value = 0;
+      osc.connect(oscGain);
+      oscGain.connect(audioCtx.destination);
+      osc.start();
+      const now = audioCtx.currentTime;
+      noiseGain.gain.cancelScheduledValues(now); oscGain.gain.cancelScheduledValues(now);
+      noiseGain.gain.setValueAtTime(0, now); noiseGain.gain.linearRampToValueAtTime(0.9, now+0.02);
+      noiseGain.gain.exponentialRampToValueAtTime(0.001, now+1.2);
+      oscGain.gain.setValueAtTime(0, now); oscGain.gain.linearRampToValueAtTime(0.8, now+0.02);
+      oscGain.gain.exponentialRampToValueAtTime(0.0001, now+1.2);
+      osc.frequency.setValueAtTime(900, now+0.01); osc.frequency.exponentialRampToValueAtTime(160, now+1.1);
+      horrorNodes = {noise,osc};
+      setTimeout(()=> stopHorror(), 1700);
+    }
+    function stopHorror(){ if (!horrorNodes) return; try{ horrorNodes.noise.stop(); }catch{} try{ horrorNodes.osc.stop(); }catch{} horrorNodes=null; }
+
+    // Inline images at runtime (try to fetch and convert to dataURL; stored in localStorage)
+    async function fetchAndStoreAsDataURL(url, key){
+      const stored = localStorage.getItem(key);
+      if (stored) return stored;
+      try {
+        const resp = await fetch(url, { mode: 'cors' });
+        if (!resp.ok) throw new Error('fetch failed');
+        const blob = await resp.blob();
+        return await blobToDataURL(blob, key);
+      } catch (err) {
+        console.warn('Could not inline', url, err);
+        return null;
+      }
+    }
+    function blobToDataURL(blob, key){
+      return new Promise((resolve) => {
+        const reader = new FileReader();
+        reader.onload = () => { try { localStorage.setItem(key, reader.result); } catch(e){}; resolve(reader.result); };
+        reader.onerror = () => resolve(null);
+        reader.readAsDataURL(blob);
+      });
+    }
+    async function inlineImages(){
+      const capKey = 'valent-capy-inlined';
+      const chomKey = 'valent-chom-inlined';
+      const cap = await fetchAndStoreAsDataURL(CAPY_URL, capKey);
+      imgCapy.src = cap || CAPY_URL;
+      const chom = await fetchAndStoreAsDataURL(CHOMBY_URL, chomKey);
+      imgChomby.src = chom || CHOMBY_URL;
+    }
+
+    // Final buttons
+    document.getElementById('yes-btn').addEventListener('click', () => alert("You clicked YES — rom-com ending! 💖"));
+    document.getElementById('no-btn').addEventListener('click', () => alert("You clicked NO — awkward silence... 😬"));
+
+    // Initialization
+    function init(){
+      buildVisualSegments();
+      finishEl.style.left = (FINISH_POS.x) + 'px';
+      finishEl.style.top = (FINISH_POS.y) + 'px';
+      finishEl.classList.add('hidden');
+      // keyboard shortcuts: '1' for quick testing
+      document.addEventListener('keydown', (e) => {
+        if (e.key === '1') showLevel(1);
+        if (e.key === 's') disableScareChk.checked = !disableScareChk.checked;
+      });
+    }
+    init();
+  </script>
+
+  <!--
+    CHANGELOG (embedded)
+    v1.2.1 - 2026-02-02
+    - Fixed: connected visible path to finish so the black heart is reachable.
+    - Changed: renamed the single playable level to Level 1.
+    - Fixed: ghost jump-scare now fades/backdrops before the end overlay appears so the end scene is visible.
+  -->
+</body>
+</html>
